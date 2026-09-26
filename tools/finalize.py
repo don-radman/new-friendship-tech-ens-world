@@ -210,8 +210,7 @@ def main(city):
     }
     write_json(out / "manifest.json", manifest)
     with open(out / "manifest.csv", "w", encoding="utf-8", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=list(rows[0].keys()) if rows else ["slug"], lineterminator="
-")
+        w = csv.DictWriter(f, fieldnames=list(rows[0].keys()) if rows else ["slug"], lineterminator="\n")
         w.writeheader()
         w.writerows(rows)
     print(manifest["counts"])

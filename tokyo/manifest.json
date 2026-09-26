@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "city": "tokyo",
-  "generatedAt": "2026-09-26T13:58:20Z",
+  "generatedAt": "2026-09-26T13:59:56Z",
   "catalog": {
     "repo": "https://github.com/alexb0wman/new-friendship-tech",
     "path": "content/asia-catalog.json",
