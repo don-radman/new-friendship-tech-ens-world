@@ -204,6 +204,8 @@ export function ApprovalModal({
               credential="human"
               signal={current.proofRequest.signal}
               requireUserPresence
+              session={current.proofRequest.session ?? "prove"}
+              sessionId={current.proofRequest.session_id}
               description={current.summary}
               onVerify={async (proof) => {
                 setBusy(true);

@@ -4,8 +4,8 @@ import { getDb, type Tx } from "@/server/db";
 import * as s from "@/server/db/schema";
 import { applyWrite } from "@/server/db/write";
 import { AppError, invariant } from "@/server/errors";
-import { world, WORLD_ACTION_APPROVAL, type AgentIdentity } from "./adapter";
-import { worldProofIssuer } from "./live";
+import { world, type AgentIdentity } from "./adapter";
+import { sessionRpContext, verifySessionProof, worldProofIssuer } from "./live";
 import { digest } from "./requests";
 import type { ApprovalAction, ApprovalDTO } from "@/lib/types";
 
@@ -86,7 +86,13 @@ export async function requestApproval(
     409,
   );
   invariant(executors.has(input.action), "APPROVAL_UNHANDLED", "Unknown action.", 500);
-  const rp = world().kind === "live" ? await world().rpContext(WORLD_ACTION_APPROVAL) : null;
+  // Link creates a World ID session; every later approval proves that same session again.
+  const rp =
+    world().kind === "live"
+      ? await sessionRpContext(
+          link ? { mode: "create" } : { mode: "prove", sessionId: user.worldAgentSub! },
+        )
+      : null;
   const { verifier, challenge } = pkce(),
     nonce = rp?.nonce ?? randomBytes(16).toString("hex");
   const row = await applyWrite(
@@ -194,16 +200,14 @@ export async function finishApproval(input: {
       "A World ID proof is required.",
       422,
     );
-    const verified = await world().verifyProof({
+    const verified = await verifySessionProof({
       payload: input.proof,
-      action: row.rpContext.action,
       signal: approvalSignal(row),
       nonce: row.nonce,
-      requireUserPresence: true,
     });
     identity = {
       issuer: worldProofIssuer(),
-      sub: verified.nullifier,
+      sub: verified.sessionId,
       nonce: row.nonce,
       authTime: new Date(row.rpContext.created_at * 1000),
     };

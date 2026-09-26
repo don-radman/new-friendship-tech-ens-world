@@ -50,6 +50,9 @@ export async function handle(ctx: RouteContext): Promise<Response | null> {
     const body = trips.activateSchema
       .omit({ proof: true, requestId: true })
       .parse(await jsonBody(request));
+    // Already proven human: World ID 4.0 will not issue a second proof, so none is needed.
+    if (world().kind === "live" && (await trips.priorHumanProof(user.id)))
+      return ok({ verified: true });
     return ok(await createTripProofRequest(user, body));
   }
   if (path === "world/verify" && method === "POST") {

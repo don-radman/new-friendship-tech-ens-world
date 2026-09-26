@@ -13,6 +13,9 @@ export interface RpContextDTO {
   app_id: string;
   action: string;
   environment: "production" | "staging" | "sandbox" | "simulated";
+  /** Concierge approvals use World ID sessions: uniqueness proofs are one-time per action. */
+  session?: "create" | "prove";
+  session_id?: string;
 }
 export interface ProofRequestDTO extends RpContextDTO {
   requestId: string;

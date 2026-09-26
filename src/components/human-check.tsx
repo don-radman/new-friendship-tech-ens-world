@@ -129,12 +129,18 @@ function LiveHumanCheck(props: HumanCheckProps) {
     setError(null);
     try {
       const { proof: _proof, ...body } = activationBody(props, undefined);
-      setRp(
-        await api<ProofRequestDTO>("world/rp-context", {
-          method: "POST",
-          body: JSON.stringify(body),
-        }),
-      );
+      const next = await api<ProofRequestDTO | { verified: true }>("world/rp-context", {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+      // Already proven human on an earlier trip: World ID 4.0 proofs are one-time per action.
+      if ("verified" in next) {
+        props.onActivated(
+          await api<TripDTO>("world/verify", { method: "POST", body: JSON.stringify(body) }),
+        );
+        return;
+      }
+      setRp(next);
       setOpen(true);
     } catch (caught) {
       setError(new Error(failureCopy(caught)));

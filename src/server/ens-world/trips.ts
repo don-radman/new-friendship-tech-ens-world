@@ -1,4 +1,4 @@
-import { and, asc, eq, gt, inArray, lte, sql } from "drizzle-orm";
+import { and, asc, eq, gt, inArray, lte, ne, sql } from "drizzle-orm";
 import { z } from "zod";
 import { getDb, type Database, type Tx } from "@/server/db";
 import * as s from "@/server/db/schema";
@@ -19,7 +19,7 @@ import {
   ensJobCheckpoint,
   ensJobSubmission,
 } from "@/server/ens-v2/jobs";
-import { world, WORLD_ACTION_TRIP } from "@/server/world/adapter";
+import { world, WORLD_ACTION_TRIP, type VerifiedProof } from "@/server/world/adapter";
 import { consumeTripProofRequest, tripProofRequest } from "@/server/world/requests";
 import { nowRecord, tripDTO } from "./dto";
 import type { NowRecord, TripDTO } from "@/lib/types";
@@ -36,7 +36,7 @@ export const activateSchema = z
     label: labelSchema.optional(),
     arrivesAt: z.iso.datetime({ offset: true }),
     departsAt: z.iso.datetime({ offset: true }),
-    proof: z.unknown(),
+    proof: z.unknown().optional(),
     requestId: z.uuid().optional(),
   })
   .strict();
@@ -127,6 +127,22 @@ export async function tickEnsWorld() {
   await expireTrips();
   await drainEnsJobs();
 }
+/** A live account's stored Proof of Human. World ID 4.0 issues one proof per human per action. */
+export async function priorHumanProof(userId: string, db?: Tx | Database) {
+  const [row] = await (db ?? (await getDb()))
+    .select()
+    .from(s.humanProofs)
+    .where(
+      and(
+        eq(s.humanProofs.userId, userId),
+        eq(s.humanProofs.action, WORLD_ACTION_TRIP),
+        ne(s.humanProofs.environment, "simulated"),
+      ),
+    )
+    .orderBy(asc(s.humanProofs.verifiedAt))
+    .limit(1);
+  return row ?? null;
+}
 export async function activateTrip(
   user: s.UserRow,
   body: z.infer<typeof activateSchema>,
@@ -138,23 +154,65 @@ export async function activateTrip(
   assertDates(arrivesAt, departsAt);
   // Release partial-unique active-trip slots before a returning member starts another trip.
   await expireTrips(new Date(), user.id);
-  const request =
-    world().kind === "live" ? await tripProofRequest(user.id, body.requestId, body) : null;
-  const verified = await world().verifyProof({
-    payload: body.proof,
-    action: WORLD_ACTION_TRIP,
-    signal: request?.signal ?? body.city,
-    nonce: request?.rpContext.nonce,
-  });
+  // World ID 4.0 uniqueness proofs are one-time per (human, action): a live account proves it is
+  // human once, and every later trip reuses that stored proof.
+  let prior = world().kind === "live" ? await priorHumanProof(user.id) : null;
+  let verified: VerifiedProof | null = null;
+  if (!prior) {
+    const request =
+      world().kind === "live" ? await tripProofRequest(user.id, body.requestId, body) : null;
+    const proven = await world().verifyProof({
+      payload: body.proof,
+      action: WORLD_ACTION_TRIP,
+      signal: request?.signal ?? body.city,
+      nonce: request?.rpContext.nonce,
+    });
+    verified = proven;
+    // Persist before the trip insert: if the trip fails, World will not issue this human another proof.
+    if (request)
+      prior = await applyWrite(user.id, "human.verify", body.city, async (tx) => {
+        await consumeTripProofRequest(tx, request.id, user.id);
+        const [other] = await tx
+          .select({ id: s.humanProofs.id })
+          .from(s.humanProofs)
+          .where(
+            and(
+              eq(s.humanProofs.action, WORLD_ACTION_TRIP),
+              eq(s.humanProofs.nullifier, proven.nullifier),
+              ne(s.humanProofs.userId, user.id),
+            ),
+          )
+          .limit(1);
+        invariant(
+          !other,
+          "HUMAN_ALREADY_PRESENT",
+          "This World ID already verified another account. One human, one account.",
+          409,
+        );
+        return (
+          await tx
+            .insert(s.humanProofs)
+            .values({
+              userId: user.id,
+              action: WORLD_ACTION_TRIP,
+              city: body.city,
+              nullifier: proven.nullifier,
+              signalHash: proven.signalHash,
+              issuerSchemaId: proven.issuerSchemaId,
+              expiresAtMin: proven.expiresAtMin,
+              environment: proven.environment,
+            })
+            .returning()
+        )[0];
+      });
+  }
+  const nullifier = prior?.nullifier ?? verified!.nullifier;
   const wanted = body.label ?? suggestLabel(user.name);
   const addresses = chain().addresses;
   const trip = await applyWrite(user.id, "trip.activate", body.city, async (tx) => {
-    if (request) await consumeTripProofRequest(tx, request.id, user.id);
     await tx.select({ id: s.users.id }).from(s.users).where(eq(s.users.id, user.id)).for("update");
     // One lock per (city, human): two concurrent activations by the same World ID serialize here.
-    await tx.execute(
-      sql`select pg_advisory_xact_lock(hashtext(${body.city + ":" + verified.nullifier}))`,
-    );
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${body.city + ":" + nullifier}))`);
     invariant(
       !(await currentTrip(user.id, body.city, tx)),
       "TRIP_EXISTS",
@@ -170,7 +228,7 @@ export async function activateTrip(
           eq(s.trips.city, body.city),
           inArray(s.trips.status, [...ACTIVE_STATUSES]),
           gt(s.trips.departsAt, new Date()),
-          eq(s.humanProofs.nullifier, verified.nullifier),
+          eq(s.humanProofs.nullifier, nullifier),
         ),
       )
       .limit(1);
@@ -180,19 +238,21 @@ export async function activateTrip(
       "This World ID already has an active trip in this city. One human, one trip.",
       409,
     );
-    const [proof] = await tx
-      .insert(s.humanProofs)
-      .values({
-        userId: user.id,
-        action: WORLD_ACTION_TRIP,
-        city: body.city,
-        nullifier: verified.nullifier,
-        signalHash: verified.signalHash,
-        issuerSchemaId: verified.issuerSchemaId,
-        expiresAtMin: verified.expiresAtMin,
-        environment: verified.environment,
-      })
-      .returning();
+    const [proof] = prior
+      ? [prior]
+      : await tx
+          .insert(s.humanProofs)
+          .values({
+            userId: user.id,
+            action: WORLD_ACTION_TRIP,
+            city: body.city,
+            nullifier,
+            signalHash: verified!.signalHash,
+            issuerSchemaId: verified!.issuerSchemaId,
+            expiresAtMin: verified!.expiresAtMin,
+            environment: verified!.environment,
+          })
+          .returning();
     const taken = new Set(
       (
         await tx

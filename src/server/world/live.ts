@@ -50,11 +50,147 @@ export function worldProofIssuer() {
   const e = env();
   return `world-id:${e.rpId}:${e.environment}`;
 }
+/**
+ * World ID 4.0 uniqueness proofs are one-time per (human, action), so recurring checks use
+ * sessions: linking creates one, every later approval proves it again. Session requests are
+ * signed without an action.
+ */
+export async function sessionRpContext(
+  input: { mode: "create" } | { mode: "prove"; sessionId: string },
+): Promise<RpContextDTO> {
+  const e = env();
+  const { signRequest } = await import("@worldcoin/idkit/signing");
+  const signed = signRequest({ signingKeyHex: e.signingKey });
+  return {
+    rp_id: e.rpId,
+    app_id: e.appId,
+    action: "",
+    nonce: signed.nonce,
+    created_at: signed.createdAt,
+    expires_at: signed.expiresAt,
+    signature: signed.sig,
+    environment: e.environment,
+    session: input.mode,
+    ...(input.mode === "prove" ? { session_id: input.sessionId } : {}),
+  };
+}
+const SESSION_ID = /^session_[A-Za-z0-9]+$/;
+export async function verifySessionProof(input: {
+  payload: unknown;
+  signal: string;
+  nonce: string;
+}): Promise<{ sessionId: string }> {
+  const e = env();
+  const payload = input.payload as {
+    protocol_version?: string;
+    action?: string;
+    nonce?: string;
+    environment?: string;
+    session_id?: string;
+    user_presence_completed?: boolean;
+    responses?: {
+      identifier?: string;
+      signal_hash?: string;
+      issuer_schema_id?: number;
+      expires_at_min?: number;
+    }[];
+  } | null;
+  invariant(
+    payload &&
+      typeof payload === "object" &&
+      payload.protocol_version === "4.0" &&
+      payload.action === undefined &&
+      payload.environment === e.environment &&
+      payload.nonce === input.nonce &&
+      typeof payload.session_id === "string" &&
+      SESSION_ID.test(payload.session_id) &&
+      Array.isArray(payload.responses) &&
+      payload.responses.length === 1,
+    "WORLD_VERIFY_FAILED",
+    "This proof does not match the issued World ID request.",
+    422,
+  );
+  const credential = payload.responses[0];
+  invariant(
+    credential?.identifier === "proof_of_human" && credential.issuer_schema_id === 1,
+    "WORLD_CREDENTIAL_UNAVAILABLE",
+    "A World ID Proof of Human credential is required.",
+    422,
+  );
+  const { hashSignal } = await import("@worldcoin/idkit/hashing");
+  invariant(
+    typeof credential.signal_hash === "string" &&
+      /^0x[0-9a-fA-F]{1,64}$/.test(credential.signal_hash) &&
+      BigInt(credential.signal_hash) === BigInt(hashSignal(input.signal)),
+    "WORLD_SIGNAL_MISMATCH",
+    "This proof was made for a different account or request.",
+    422,
+  );
+  invariant(
+    payload.user_presence_completed === true,
+    "APPROVAL_STALE",
+    "Confirm this request in World App to continue.",
+    422,
+  );
+  invariant(
+    typeof credential.expires_at_min === "number" && credential.expires_at_min * 1000 > Date.now(),
+    "WORLD_VERIFY_FAILED",
+    "The World ID credential has expired.",
+    422,
+  );
+  const body = await postToVerifier(e.rpId, payload);
+  const result = body.results?.find((item) => item.identifier === credential.identifier);
+  // The verifier echoes these for sessions; reject a contradiction, tolerate an omission.
+  invariant(
+    body.success === true &&
+      result?.success === true &&
+      (body.session_id === undefined || body.session_id === payload.session_id) &&
+      (body.environment === undefined || body.environment === e.environment),
+    "WORLD_VERIFY_FAILED",
+    "World ID could not verify this session proof.",
+    422,
+  );
+  return { sessionId: payload.session_id };
+}
+type VerifierBody = {
+  success?: boolean;
+  environment?: string;
+  action?: string;
+  session_id?: string;
+  results?: { identifier?: string; success?: boolean; nullifier?: string }[];
+};
+async function postToVerifier(rpId: string, payload: unknown): Promise<VerifierBody> {
+  let response: Response;
+  try {
+    response = await fetch(
+      `https://developer.world.org/api/v4/verify/${encodeURIComponent(rpId)}`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(15000),
+        redirect: "error",
+      },
+    );
+  } catch {
+    throw new AppError("WORLD_VERIFY_FAILED", "World ID verification is unreachable.", 503, true);
+  }
+  const body = (await response.json().catch(() => null)) as VerifierBody | null;
+  if (response.status === 429 || response.status >= 500)
+    throw new AppError(
+      "WORLD_VERIFY_FAILED",
+      "World ID verification is temporarily unavailable.",
+      503,
+      true,
+    );
+  invariant(response.ok && body, "WORLD_VERIFY_FAILED", "World ID rejected this proof.", 422);
+  return body;
+}
 export class LiveWorld implements WorldAdapter {
   readonly kind = "live" as const;
   async rpContext(action: string): Promise<RpContextDTO> {
     const e = env();
-    const { signRequest } = await import("@worldcoin/idkit-core/signing");
+    const { signRequest } = await import("@worldcoin/idkit/signing");
     const signed = signRequest({ signingKeyHex: e.signingKey, action });
     return {
       rp_id: e.rpId,
@@ -105,7 +241,7 @@ export class LiveWorld implements WorldAdapter {
       "A World ID Proof of Human credential is required.",
       422,
     );
-    const { hashSignal } = await import("@worldcoin/idkit-core/hashing");
+    const { hashSignal } = await import("@worldcoin/idkit/hashing");
     invariant(
       typeof credential.signal_hash === "string" &&
         /^0x[0-9a-fA-F]{1,64}$/.test(credential.signal_hash) &&

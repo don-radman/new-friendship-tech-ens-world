@@ -26,7 +26,7 @@ Place secrets in the runtime secret store. Do not paste private keys into chat, 
 | Sepolia parent name, two distinct funded Sepolia keys, `ENS_SEPOLIA_RPC_URL`       | ENSv2 bootstrap, name issuance and limited concierge writes                                          |
 | Bootstrap output addresses                                                         | `ENS_PARENT_REGISTRY`, `ENS_CITY_REGISTRY_TOKYO`, `ENS_APP_RESOLVER`                                 |
 | World production app ID, RP ID, RP signing key                                     | Real human verification and approval; `WORLD_ENVIRONMENT=production`                                 |
-| World actions `trip-activate` and `concierge-approve`                              | Stable, separate nullifier scopes; use configured overrides consistently                             |
+| World action `trip-activate` (production)                                          | One-time Proof of Human per account; approvals use World ID sessions and need no action              |
 | Merchant EOA `PAYMENT_RECIPIENT`                                                   | Native 0G settlement destination; current verifier excludes contract treasuries                      |
 | `PAYMENT_SOURCE_RPC_URL` for Base; `PAYMENT_RPC_URL` for 0G                        | Independent chain verification; 0G RPC must support call traces for internal transfers               |
 | `SPLIT_NETWORK=base`; `SPLIT_RPC_URL`                                              | Real USDC table payments; retain network-specific RPCs for outstanding shares after a network switch |
@@ -46,7 +46,7 @@ Bootstrap must validate the Sepolia chain, deployment code, distinct signing ide
 
 Use the current IDKit v4 server-signed RP context, with production pinned by the server. Accept only supported successful credential responses and require the exact expected action, signal and nonce. A browser success callback never establishes verification.
 
-Store short-lived proof requests durably, bind them to the signed-in account and intended operation, and consume them atomically. Trip activation enforces one active human per city. Concierge link and subsequent approvals use the same action scope to enforce a stable linked human. Payload mutation, different account/human, replay, denial and expiration must not execute the protected action. Denial/expiration audit-state updates are allowed; business writes and blockchain writes are not.
+Store short-lived proof requests durably, bind them to the signed-in account and intended operation, and consume them atomically. World ID 4.0 uniqueness proofs are one-time per human per action. Trip activation therefore proves an account human once (`trip-activate`), stores the nullifier, and reuses it for every later trip; one human cannot verify a second account. The concierge link creates a World ID session and every approval proves that same session again (see WORLD-V4-FIX.md). Payload mutation, different account/human, replay, denial and expiration must not execute the protected action. Denial/expiration audit-state updates are allowed; business writes and blockchain writes are not.
 
 ### Membership payments
 

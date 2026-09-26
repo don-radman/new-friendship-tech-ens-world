@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { eq, sql } from "drizzle-orm";
-import { hashSignal } from "@worldcoin/idkit-core/hashing";
+import { hashSignal } from "@worldcoin/idkit/hashing";
 import { getDb, closeDb, type Database } from "@/server/db";
 import { DEMO_IDS, seedDemo } from "@/server/db/seed";
 import * as s from "@/server/db/schema";
@@ -40,14 +40,48 @@ const proof = (action: string, signal: string, nonce = "request-nonce", nullifie
     },
   ],
 });
-const verified = (payload: ReturnType<typeof proof>) => ({
-  success: true,
+/** World ID session proof (concierge link and approvals): no action, a stable session_id. */
+const sessionProof = (signal: string, nonce: string, sessionId = "session_ab01") => ({
+  protocol_version: "4.0",
+  nonce,
+  session_id: sessionId,
   environment: "production",
-  action: payload.action,
-  results: [
-    { identifier: "proof_of_human", success: true, nullifier: payload.responses[0].nullifier },
+  user_presence_completed: true,
+  responses: [
+    {
+      identifier: "proof_of_human",
+      issuer_schema_id: 1,
+      session_nullifier: ["0x05", "0x06"],
+      signal_hash: hashSignal(signal),
+      expires_at_min: Math.floor(Date.now() / 1000) + 3600,
+      proof: ["0x01"],
+    },
   ],
 });
+const verified = (payload: {
+  action?: string;
+  session_id?: string;
+  responses: { nullifier?: string }[];
+}) =>
+  payload.session_id
+    ? {
+        success: true,
+        environment: "production",
+        session_id: payload.session_id,
+        results: [{ identifier: "proof_of_human", success: true }],
+      }
+    : {
+        success: true,
+        environment: "production",
+        action: payload.action,
+        results: [
+          {
+            identifier: "proof_of_human",
+            success: true,
+            nullifier: payload.responses[0].nullifier,
+          },
+        ],
+      };
 function mockVerifier(effect?: () => Promise<void>) {
   return vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
     const payload = JSON.parse(String(init?.body));
@@ -83,9 +117,12 @@ async function user(id = DEMO_IDS.maya) {
 function enableLive() {
   vi.spyOn(adapter, "world").mockReturnValue(live);
 }
-function approvalProof(row: Awaited<ReturnType<typeof requestApproval>>, nullifier = "0x01") {
+function approvalProof(
+  row: Awaited<ReturnType<typeof requestApproval>>,
+  sessionId = "session_ab01",
+) {
   const r = row.proofRequest!;
-  return proof(r.action, r.signal, r.nonce, nullifier);
+  return sessionProof(r.signal, r.nonce, sessionId);
 }
 async function link() {
   enableLive();
@@ -157,7 +194,11 @@ describe("production World proof verification", () => {
     "rejects HTTP 200 with %s",
     async (mutation) => {
       const payload = proof("trip-activate", "signal"),
-        result = verified(payload);
+        result = verified(payload) as {
+          environment: string;
+          action?: string;
+          results: { identifier: string; success: boolean; nullifier?: string }[];
+        };
       if (mutation === "failed human") result.results[0].success = false;
       if (mutation === "different result") result.results[0].identifier = "selfie";
       if (mutation === "nullifier") result.results[0].nullifier = "0x02";
@@ -231,9 +272,7 @@ describe("durable World trip request", () => {
     const activated = await api("world/verify", "maya", "POST", input);
     expect(activated.status).toBe(201);
     expect(activated.body.status).toBe("active");
-    expect((await api("world/verify", "maya", "POST", input)).body.error.code).toBe(
-      "WORLD_REQUEST_INVALID",
-    );
+    expect((await api("world/verify", "maya", "POST", input)).body.error.code).toBe("TRIP_EXISTS");
     expect(
       await db.select().from(s.humanProofs).where(eq(s.humanProofs.userId, DEMO_IDS.maya)),
     ).toHaveLength(1);
@@ -259,6 +298,55 @@ describe("durable World trip request", () => {
     expect(result.body.error.code).toBe("WORLD_REQUEST_INVALID");
     expect(await db.select().from(s.humanProofs)).toHaveLength(0);
     expect(await db.select().from(s.trips)).toHaveLength(0);
+  });
+  it("proves a live account human once and reuses it for every later trip", async () => {
+    enableLive();
+    const body = {
+      ...trip,
+      arrivesAt: new Date().toISOString(),
+      departsAt: new Date(Date.now() + 86400000).toISOString(),
+    };
+    const r = (await api("world/rp-context", "maya", "POST", body)).body as adapter.ProofRequestDTO;
+    const first = await api("world/verify", "maya", "POST", {
+      ...body,
+      requestId: r.requestId,
+      proof: proof(r.action, r.signal, r.nonce),
+    });
+    expect(first.status).toBe(201);
+    await db
+      .update(s.trips)
+      .set({ arrivesAt: new Date(Date.now() - 7200000), departsAt: new Date(Date.now() - 3600000) })
+      .where(eq(s.trips.id, first.body.id));
+    // World ID 4.0 will not issue this human a second trip-activate proof, so none is asked for.
+    expect((await api("world/rp-context", "maya", "POST", body)).body).toEqual({ verified: true });
+    const again = await api("world/verify", "maya", "POST", body);
+    expect(again.status).toBe(201);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(
+      await db.select().from(s.humanProofs).where(eq(s.humanProofs.userId, DEMO_IDS.maya)),
+    ).toHaveLength(1);
+  });
+  it("refuses a World ID proof already bound to another account", async () => {
+    enableLive();
+    const body = {
+      ...trip,
+      arrivesAt: new Date().toISOString(),
+      departsAt: new Date(Date.now() + 86400000).toISOString(),
+    };
+    for (const [account, label, code] of [
+      ["maya", "maya", 201],
+      ["kenji", "kenji", 409],
+    ] as const) {
+      const r = (await api("world/rp-context", account, "POST", { ...body, label }))
+        .body as adapter.ProofRequestDTO;
+      const result = await api("world/verify", account, "POST", {
+        ...body,
+        label,
+        requestId: r.requestId,
+        proof: proof(r.action, r.signal, r.nonce),
+      });
+      expect(result.status).toBe(code);
+    }
   });
   it("revokes stale trips immediately and lets a returning traveler start again", async () => {
     const body = {
@@ -294,7 +382,7 @@ describe("durable World trip request", () => {
 describe("production IDKit concierge approvals", () => {
   it("links and approves with an account-bound proof, exactly once, with no OIDC configuration", async () => {
     const actor = await link();
-    expect(actor.worldAgentSub).toBe("1");
+    expect(actor.worldAgentSub).toBe("session_ab01");
     expect(actor.worldAgentIssuer).toBe("world-id:rp_test:production");
     let calls = 0;
     registerApprovalExecutor("now.publish", async () => {
@@ -307,7 +395,8 @@ describe("production IDKit concierge approvals", () => {
       summary: "Post invitation",
     });
     expect(pending.url).toBeNull();
-    expect(pending.proofRequest?.action).toBe("concierge-approve");
+    expect(pending.proofRequest?.session).toBe("prove");
+    expect(pending.proofRequest?.session_id).toBe("session_ab01");
     const result = await api("world/agent/verify", "maya", "POST", {
       approvalId: pending.id,
       proof: approvalProof(pending),
@@ -349,7 +438,11 @@ describe("production IDKit concierge approvals", () => {
       finishApproval({ approvalId: a.id, userId: DEMO_IDS.kenji, proof: approvalProof(a) }),
     ).rejects.toHaveProperty("code", "NOT_FOUND");
     await expect(
-      finishApproval({ approvalId: a.id, userId: actor.id, proof: approvalProof(a, "0x02") }),
+      finishApproval({
+        approvalId: a.id,
+        userId: actor.id,
+        proof: approvalProof(a, "session_ff02"),
+      }),
     ).rejects.toHaveProperty("code", "APPROVAL_SUBJECT");
     expect((await api("world/agent/deny", "maya", "POST", { approvalId: a.id })).body.status).toBe(
       "denied",
@@ -398,7 +491,23 @@ describe("production IDKit concierge approvals", () => {
       expect((await loadApproval(pending.id)).status).toBe("pending");
     },
   );
-  it("refuses linking the same human to a second account", async () => {
+  it("refuses a one-time uniqueness proof where a session proof is required", async () => {
+    const actor = await link();
+    const pending = await requestApproval(actor, {
+      action: "agent.link",
+      payload: {},
+      summary: "Relink",
+    });
+    const r = pending.proofRequest!;
+    await expect(
+      finishApproval({
+        approvalId: pending.id,
+        userId: actor.id,
+        proof: proof("concierge-approve", r.signal, r.nonce),
+      }),
+    ).rejects.toHaveProperty("code", "WORLD_VERIFY_FAILED");
+  });
+  it("refuses linking the same World ID session to a second account", async () => {
     await link();
     const pending = await requestApproval(await user(DEMO_IDS.kenji), {
       action: "agent.link",
