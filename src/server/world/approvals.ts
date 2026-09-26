@@ -4,7 +4,7 @@ import { getDb, type Tx } from "@/server/db";
 import * as s from "@/server/db/schema";
 import { applyWrite } from "@/server/db/write";
 import { AppError, invariant } from "@/server/errors";
-import { world, type AgentIdentity } from "./adapter";
+import { agentApprovals, world, type AgentIdentity } from "./adapter";
 import { sessionRpContext, verifySessionProof, worldProofIssuer } from "./live";
 import { digest } from "./requests";
 import type { ApprovalAction, ApprovalDTO } from "@/lib/types";
@@ -87,8 +87,9 @@ export async function requestApproval(
   );
   invariant(executors.has(input.action), "APPROVAL_UNHANDLED", "Unknown action.", 500);
   // Link creates a World ID session; every later approval proves that same session again.
+  // WORLD_APPROVALS=agents sends approvals through World ID for Agents (OIDC) instead.
   const rp =
-    world().kind === "live"
+    world().kind === "live" && !agentApprovals()
       ? await sessionRpContext(
           link ? { mode: "create" } : { mode: "prove", sessionId: user.worldAgentSub! },
         )
@@ -213,7 +214,7 @@ export async function finishApproval(input: {
     };
   } else {
     invariant(
-      world().kind === "simulated",
+      world().kind === "simulated" || agentApprovals(),
       "APPROVAL_INCOMPLETE",
       "Start a new World ID proof request.",
       409,

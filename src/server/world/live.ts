@@ -1,5 +1,7 @@
+import { createRemoteJWKSet, jwtVerify } from "jose";
 import { AppError, invariant } from "@/server/errors";
 import {
+  agentApprovals,
   nullifierToDecimal,
   type AgentIdentity,
   type ProofInput,
@@ -8,7 +10,7 @@ import {
   type WorldAdapter,
 } from "./adapter";
 
-/** Production IDKit uses the Developer Portal verifier. Sandbox OIDC is not a live approval path. */
+/** IDKit uses the Developer Portal verifier. WORLD_ALLOW_STAGING opts a build into the simulator. */
 function env() {
   const appId = process.env.WORLD_APP_ID;
   const rpId = process.env.WORLD_RP_ID;
@@ -27,9 +29,10 @@ function env() {
   );
   invariant(
     environment === "production" ||
-      (process.env.NODE_ENV !== "production" && ["staging", "sandbox"].includes(environment)),
+      ((process.env.NODE_ENV !== "production" || process.env.WORLD_ALLOW_STAGING === "true") &&
+        ["staging", "sandbox"].includes(environment)),
     "WORLD_UNAVAILABLE",
-    "Production deployments require WORLD_ENVIRONMENT=production.",
+    "Production deployments require WORLD_ENVIRONMENT=production (or WORLD_ALLOW_STAGING=true).",
     503,
   );
   invariant(
@@ -314,20 +317,130 @@ export class LiveWorld implements WorldAdapter {
       environment: e.environment,
     };
   }
-  async agentAuthorizeUrl(): Promise<string> {
-    throw new AppError(
+  private discovery?: Promise<Discovery>;
+  private jwks?: ReturnType<typeof createRemoteJWKSet>;
+  /** World ID for Agents: OIDC authorization code + PKCE S256, pairwise sub, RS256 ID tokens. */
+  private agents() {
+    const issuer = process.env.WORLD_AGENTS_ISSUER?.replace(/\/$/, ""),
+      clientId = process.env.WORLD_AGENTS_CLIENT_ID,
+      clientSecret = process.env.WORLD_AGENTS_CLIENT_SECRET,
+      redirectUri = process.env.WORLD_AGENTS_REDIRECT_URI;
+    invariant(
+      agentApprovals() && issuer && clientId && clientSecret && redirectUri,
       "WORLD_AGENTS_UNAVAILABLE",
-      "Use an account-bound IDKit approval request.",
+      "World ID for Agents is not configured: set WORLD_APPROVALS=agents and the WORLD_AGENTS_* client.",
       503,
     );
+    return { issuer, clientId, clientSecret, redirectUri };
   }
-  async agentExchange(): Promise<AgentIdentity> {
-    throw new AppError(
-      "WORLD_AGENTS_UNAVAILABLE",
-      "Sandbox OIDC callbacks cannot approve production actions.",
-      503,
+  private async discover(): Promise<Discovery> {
+    const a = this.agents();
+    return (this.discovery ??= (async () => {
+      const response = await fetch(a.issuer + "/.well-known/openid-configuration", {
+        signal: AbortSignal.timeout(10000),
+      });
+      invariant(response.ok, "WORLD_AGENTS_UNAVAILABLE", "OIDC discovery failed.", 503);
+      const doc = (await response.json()) as Discovery;
+      invariant(
+        doc.issuer === a.issuer && doc.authorization_endpoint && doc.token_endpoint && doc.jwks_uri,
+        "WORLD_AGENTS_UNAVAILABLE",
+        "OIDC discovery document is incomplete.",
+        503,
+      );
+      return doc;
+    })().catch((error) => {
+      this.discovery = undefined;
+      throw error;
+    }));
+  }
+  async agentAuthorizeUrl(input: {
+    approvalId: string;
+    nonce: string;
+    codeChallenge: string;
+    fresh: boolean;
+  }): Promise<string> {
+    const a = this.agents(),
+      doc = await this.discover();
+    const url = new URL(doc.authorization_endpoint);
+    url.searchParams.set("response_type", "code");
+    url.searchParams.set("client_id", a.clientId);
+    url.searchParams.set("redirect_uri", a.redirectUri);
+    url.searchParams.set("scope", "openid");
+    url.searchParams.set("state", input.approvalId);
+    url.searchParams.set("nonce", input.nonce);
+    url.searchParams.set("code_challenge", input.codeChallenge);
+    url.searchParams.set("code_challenge_method", "S256");
+    // RFC 9470 step-up: every protected action needs a fresh authentication, not a remembered one.
+    if (input.fresh) {
+      url.searchParams.set("prompt", "login");
+      url.searchParams.set("max_age", "0");
+    }
+    return url.toString();
+  }
+  async agentExchange(input: { code: string; codeVerifier: string }): Promise<AgentIdentity> {
+    const a = this.agents(),
+      doc = await this.discover();
+    let response: Response;
+    try {
+      response = await fetch(doc.token_endpoint, {
+        method: "POST",
+        headers: {
+          "content-type": "application/x-www-form-urlencoded",
+          authorization:
+            "Basic " + Buffer.from(a.clientId + ":" + a.clientSecret).toString("base64"),
+        },
+        body: new URLSearchParams({
+          grant_type: "authorization_code",
+          code: input.code,
+          redirect_uri: a.redirectUri,
+          code_verifier: input.codeVerifier,
+        }),
+        signal: AbortSignal.timeout(15000),
+      });
+    } catch {
+      throw new AppError("WORLD_AGENT_TOKEN", "World ID for Agents is unreachable.", 503, true);
+    }
+    const body = (await response.json().catch(() => null)) as { id_token?: string } | null;
+    invariant(
+      response.ok && body?.id_token,
+      "WORLD_AGENT_TOKEN",
+      "World ID did not issue an identity for this approval.",
+      401,
     );
+    this.jwks ??= createRemoteJWKSet(new URL(doc.jwks_uri));
+    let payload;
+    try {
+      payload = (
+        await jwtVerify(body.id_token, this.jwks, {
+          issuer: doc.issuer,
+          audience: a.clientId,
+          algorithms: ["RS256"],
+        })
+      ).payload;
+    } catch {
+      throw new AppError("WORLD_AGENT_TOKEN", "The identity token failed validation.", 401);
+    }
+    invariant(
+      typeof payload.sub === "string" && typeof payload.nonce === "string",
+      "WORLD_AGENT_TOKEN",
+      "The identity token is missing its subject or nonce.",
+      401,
+    );
+    const authTime = typeof payload.auth_time === "number" ? payload.auth_time : payload.iat;
+    return {
+      issuer: doc.issuer,
+      sub: payload.sub,
+      nonce: payload.nonce,
+      authTime: new Date((authTime ?? 0) * 1000),
+      acr: typeof payload.acr === "string" ? payload.acr : undefined,
+    };
   }
+}
+interface Discovery {
+  issuer: string;
+  authorization_endpoint: string;
+  token_endpoint: string;
+  jwks_uri: string;
 }
 let instance: LiveWorld | undefined;
 export function liveWorld(): WorldAdapter {

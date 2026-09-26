@@ -25,14 +25,15 @@ fi
 echo "Typecheck"
 npm run typecheck
 echo "World tests"
-npx vitest run tests/world-live.test.ts tests/world.test.ts tests/trips.test.ts
+npx vitest run tests/world-live.test.ts tests/world-agents.test.ts tests/world.test.ts tests/trips.test.ts
 
 cat <<'NEXT'
 
 World fix applied and checked.
-Next:
-  1. World Developer Portal: action "trip-activate" exists in production (no approval action needed).
-  2. Deploy app and worker together.
-  3. Real phone: two trips in a row, then link the concierge and approve two actions.
-Details: docs/WORLD-V4-FIX.md
+Next (details in docs/WORLD-V4-FIX.md, "Hackathon setup"):
+  1. developer.world.org: External app, action "trip-activate" in the environment you demo
+     (staging + simulator, or production with an Orb-verified World ID).
+  2. sandbox.auth.world.org/portal: OIDC client, redirect https://<APP_ORIGIN>/api/world/agent/callback
+  3. Env: WORLD_APPROVALS=agents plus WORLD_AGENTS_* (and WORLD_ALLOW_STAGING=true for the simulator).
+  4. Deploy app and worker together, then record: trip success + cancel, approval + decline + expiry.
 NEXT

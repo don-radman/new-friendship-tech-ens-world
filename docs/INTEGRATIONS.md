@@ -20,7 +20,7 @@ References: https://ens.domains/ensv2 and https://docs.ens.domains/
 
 ## World ID production
 
-Both trip activation and concierge approval use IDKit v4 with server-signed RP context. Configure `WORLD_APP_ID`, `WORLD_RP_ID`, `WORLD_RP_SIGNING_KEY`, `WORLD_ENVIRONMENT=production`, and the `trip-activate` action. Concierge approvals use World ID sessions (no action); `WORLD_ACTION_APPROVAL` is unused. See WORLD-V4-FIX.md. Sandbox OIDC credentials are no longer required for the production approval path.
+Both trip activation and concierge approval use IDKit v4 with server-signed RP context. Configure `WORLD_APP_ID`, `WORLD_RP_ID`, `WORLD_RP_SIGNING_KEY`, `WORLD_ENVIRONMENT=production`, and the `trip-activate` action. Concierge approvals use World ID for Agents (sandbox OIDC) when `WORLD_APPROVALS=agents`, otherwise IDKit sessions (no action); `WORLD_ACTION_APPROVAL` is unused. See WORLD-V4-FIX.md. Sandbox OIDC credentials are no longer required for the production approval path.
 
 The backend persists expiring, account-bound proof requests, binds the exact action and payload to their signal, validates the nonce and production environment, and requires a successful Proof of Human credential from the official v4 verifier. Weaker credentials and legacy proof/nullifier domains are not silently substituted. Trip proofs enforce one active human per city. Approvals require the linked human, recheck authorization and expiry under a database lock, and consume the proof with the protected action in one transaction. Denied, expired and replayed approvals do not execute business or blockchain writes.
 

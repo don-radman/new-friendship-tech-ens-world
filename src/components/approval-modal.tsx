@@ -164,6 +164,15 @@ export function ApprovalModal({
                     >
                       Approve with World ID <Arrow />
                     </button>
+                  ) : current.url ? (
+                    <a
+                      className="button lime"
+                      href={current.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      Approve with World ID <Arrow />
+                    </a>
                   ) : (
                     <span className="muted small">Waiting for World ID…</span>
                   )}

@@ -1,4 +1,4 @@
-> Historical integration handoff. The current implementation and production activation requirements are in [LIVE-LAUNCH-SPEC.md](LIVE-LAUNCH-SPEC.md) and [INTEGRATIONS.md](INTEGRATIONS.md). Production approvals now use IDKit, not sandbox OIDC.
+> Concierge approvals run through the official World ID for Agents dev environment (`sandbox.auth.world.org`, OIDC) when `WORLD_APPROVALS=agents`, which is how the hackathon build is configured. Setup: [WORLD-V4-FIX.md](WORLD-V4-FIX.md). Without the flag, approvals fall back to IDKit sessions.
 
 # World ID integration debrief: World ID for Agents
 

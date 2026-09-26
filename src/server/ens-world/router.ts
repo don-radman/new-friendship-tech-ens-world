@@ -3,7 +3,7 @@ import type { UserRow } from "@/server/db/schema";
 import { config, isDemo, uuid } from "@/server/config";
 import { AppError, invariant } from "@/server/errors";
 import { jsonBody } from "@/server/http";
-import { world, WORLD_ACTION_TRIP } from "@/server/world/adapter";
+import { agentApprovals, world, WORLD_ACTION_TRIP } from "@/server/world/adapter";
 import { createTripProofRequest } from "@/server/world/requests";
 import { simulatedIdentity } from "@/server/world/simulated";
 import { parentName } from "@/server/ens-v2/addresses";
@@ -74,7 +74,12 @@ export async function handle(ctx: RouteContext): Promise<Response | null> {
     );
   }
   if (path === "world/agent/callback" && method === "GET") {
-    invariant(isDemo(), "NOT_FOUND", "OIDC callbacks are not used for production approvals.", 404);
+    invariant(
+      isDemo() || agentApprovals(),
+      "NOT_FOUND",
+      "Set WORLD_APPROVALS=agents to approve through World ID for Agents.",
+      404,
+    );
     const state = url.searchParams.get("state");
     invariant(state && uuid.safeParse(state).success, "VALIDATION", "Missing state.", 422);
     let error = "";

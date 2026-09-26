@@ -63,6 +63,13 @@ export interface WorldAdapter {
 export function world(): WorldAdapter {
   return isDemo() || previewEns() ? simulatedWorld() : liveWorld();
 }
+/**
+ * Concierge approvals through the official World ID for Agents dev environment (OIDC, pairwise
+ * sub, fresh step-up), as the ETHGlobal prize requires. Otherwise approvals use IDKit sessions.
+ */
+export function agentApprovals() {
+  return process.env.WORLD_APPROVALS === "agents";
+}
 export const WORLD_ACTION_TRIP = process.env.WORLD_ACTION_TRIP || "trip-activate";
 export const WORLD_ACTION_APPROVAL = process.env.WORLD_ACTION_APPROVAL || "concierge-approve";
 export function nullifierToDecimal(hex: unknown): string {

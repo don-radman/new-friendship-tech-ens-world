@@ -1,4 +1,4 @@
-> Historical integration handoff. The current implementation and production activation requirements are in [LIVE-LAUNCH-SPEC.md](LIVE-LAUNCH-SPEC.md) and [INTEGRATIONS.md](INTEGRATIONS.md). Production approvals now use IDKit, not sandbox OIDC.
+> Trip activation uses IDKit v4 with Proof of Human, verified server-side through the Developer Portal. A World ID 4.0 proof is one-time per action, so an account proves it is human once and later trips reuse that proof. Setup: [WORLD-V4-FIX.md](WORLD-V4-FIX.md).
 
 # World ID integration debrief: IDKit at trip activation
 
