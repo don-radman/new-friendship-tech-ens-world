@@ -37,7 +37,7 @@
     "@worldcoin/idkit": "4.3.0",
     "drizzle-orm": "0.45.3",
     "jose": "6.2.12",
-    "lucide-react": "1.48.0",
+    "lucide-react": "1.49.0",
     "next": "16.3.6",
     "pg": "8.23.0",
     "react": "19.3.0",
